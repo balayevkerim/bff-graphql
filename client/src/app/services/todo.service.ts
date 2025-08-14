@@ -4,37 +4,70 @@ import { Observable, BehaviorSubject } from 'rxjs';
 import { map, catchError, tap } from 'rxjs/operators';
 import { Todo, TodoInput, TodoFilters, TodoStats, Priority } from '../models/todo.model';
 
+// GraphQL Fragments
+const TODO_FIELDS = gql`
+  fragment TodoFields on Todo {
+    id
+    title
+    description
+    completed
+    priority
+    category
+    dueDate
+    createdAt
+    updatedAt
+  }
+`;
+
+// Fragment for basic todo info (useful for lists)
+const TODO_BASIC_FIELDS = gql`
+  fragment TodoBasicFields on Todo {
+    id
+    title
+    completed
+    priority
+    category
+    dueDate
+  }
+`;
+
+// Fragment for todo with full details (useful for detail views)
+const TODO_DETAILED_FIELDS = gql`
+  fragment TodoDetailedFields on Todo {
+    ...TodoFields
+    # You could add additional fields here if your schema supports them
+    # For example: tags, assignee, comments, etc.
+  }
+  ${TODO_FIELDS}
+`;
+
+// Fragment for todo list items
+const TODO_LIST_ITEM = gql`
+  fragment TodoListItem on Todo {
+    ...TodoBasicFields
+    description
+    createdAt
+  }
+  ${TODO_BASIC_FIELDS}
+`;
+
 // GraphQL Queries
 const GET_TODOS = gql`
   query GetTodos($completed: Boolean, $category: String, $priority: Priority, $limit: Int, $offset: Int) {
     todos(completed: $completed, category: $category, priority: $priority, limit: $limit, offset: $offset) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoListItem
     }
   }
+  ${TODO_LIST_ITEM}
 `;
 
 const GET_TODO = gql`
   query GetTodo($id: ID!) {
     todo(id: $id) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoDetailedFields
     }
   }
+  ${TODO_DETAILED_FIELDS}
 `;
 
 const GET_TODOS_COUNT = gql`
@@ -55,37 +88,42 @@ const GET_PENDING_COUNT = gql`
   }
 `;
 
+// New query using basic fields for lightweight list
+const GET_TODOS_BASIC = gql`
+  query GetTodosBasic($completed: Boolean, $limit: Int) {
+    todos(completed: $completed, limit: $limit) {
+      ...TodoBasicFields
+    }
+  }
+  ${TODO_BASIC_FIELDS}
+`;
+
+// Query for todo statistics (could be extended with fragments if needed)
+const GET_TODO_STATS = gql`
+  query GetTodoStats {
+    todosCount(completed: false)
+    completedTodosCount
+    pendingTodosCount
+  }
+`;
+
 // GraphQL Mutations
 const CREATE_TODO = gql`
   mutation CreateTodo($input: TodoInput!) {
     createTodo(input: $input) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoFields
     }
   }
+  ${TODO_FIELDS}
 `;
 
 const UPDATE_TODO = gql`
   mutation UpdateTodo($id: ID!, $input: TodoInput!) {
     updateTodo(id: $id, input: $input) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoFields
     }
   }
+  ${TODO_FIELDS}
 `;
 
 const DELETE_TODO = gql`
@@ -97,33 +135,19 @@ const DELETE_TODO = gql`
 const TOGGLE_TODO = gql`
   mutation ToggleTodo($id: ID!) {
     toggleTodo(id: $id) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoFields
     }
   }
+  ${TODO_FIELDS}
 `;
 
 const MARK_TODOS_COMPLETED = gql`
   mutation MarkTodosCompleted($ids: [ID!]!) {
     markTodosCompleted(ids: $ids) {
-      id
-      title
-      description
-      completed
-      priority
-      category
-      dueDate
-      createdAt
-      updatedAt
+      ...TodoFields
     }
   }
+  ${TODO_FIELDS}
 `;
 
 const DELETE_TODOS = gql`
@@ -168,6 +192,41 @@ export class TodoService {
         if (result.data && result.data.todos) {
           const todos = result.data.todos;
           console.log('Todos received:', todos);
+          this.todosSubject.next(todos);
+          this.loadingSubject.next(false);
+          return todos;
+        } else {
+          console.error('No data in GraphQL response:', result);
+          this.loadingSubject.next(false);
+          this.errorSubject.next('No data received from server');
+          return [];
+        }
+      }),
+      catchError(error => {
+        console.error('GraphQL error:', error);
+        this.errorSubject.next(error.message || 'Failed to fetch todos');
+        this.loadingSubject.next(false);
+        return [];
+      })
+    );
+  }
+
+  // Load todos with basic fields only (for better performance)
+  loadTodosBasic(filters: { completed?: boolean; limit?: number } = {}): Observable<Todo[]> {
+    console.log('loadTodosBasic called with filters:', filters);
+    this.loadingSubject.next(true);
+    this.errorSubject.next(null);
+
+    return this.apollo.watchQuery<{ todos: Todo[] }>({
+      query: GET_TODOS_BASIC,
+      variables: filters,
+      fetchPolicy: 'network-only',
+      errorPolicy: 'all'
+    }).valueChanges.pipe(
+      map(result => {
+        if (result.data && result.data.todos) {
+          const todos = result.data.todos;
+          console.log('Basic todos received:', todos);
           this.todosSubject.next(todos);
           this.loadingSubject.next(false);
           return todos;
@@ -346,6 +405,23 @@ export class TodoService {
       query: GET_PENDING_COUNT
     }).valueChanges.pipe(
       map(result => result.data.pendingTodosCount)
+    );
+  }
+
+  // Get comprehensive todo statistics
+  getTodoStats(): Observable<{ todosCount: number; completedCount: number; pendingCount: number }> {
+    return this.apollo.watchQuery<{ 
+      todosCount: number; 
+      completedTodosCount: number; 
+      pendingTodosCount: number 
+    }>({
+      query: GET_TODO_STATS
+    }).valueChanges.pipe(
+      map(result => ({
+        todosCount: result.data.todosCount,
+        completedCount: result.data.completedTodosCount,
+        pendingCount: result.data.pendingTodosCount
+      }))
     );
   }
 
